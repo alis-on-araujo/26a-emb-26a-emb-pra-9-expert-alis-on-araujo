@@ -3,6 +3,7 @@
 import sys
 import glob
 import serial
+from serial.tools import list_ports
 import pyautogui
 import tkinter as tk
 from tkinter import ttk
@@ -16,6 +17,13 @@ pyautogui.FAILSAFE = False
 
 # Cria a fila para a comunicação entre a Thread de leitura e a interface
 fila_mouse = queue.Queue()
+
+BUTTON_MAP = {
+    3: "R",
+    4: "Y",
+    5: "B",
+    6: "G",
+}
 
 def move_mouse(axis, value):
     """Move o mouse ou clica de acordo com o eixo e valor recebidos."""
@@ -44,9 +52,13 @@ def controle(ser):
                     continue
                 # print(data) # Comentei o print para não floodar o terminal, mas pode descomentar para debugar
                 axis, value = parse_data(data)
-                print(f"Recebido -> Eixo: {axis} | Valor: {value}")
-                # Coloca na fila em vez de mover direto
-                fila_mouse.put((axis, value))
+                if axis in BUTTON_MAP:
+                    estado = "pressionado" if value == 1 else "solto"
+                    print(f"Botao {BUTTON_MAP[axis]}: {estado}")
+                else:
+                    print(f"Recebido -> Eixo: {axis} | Valor: {value}")
+                    # Coloca na fila em vez de mover direto
+                    fila_mouse.put((axis, value))
                 
         except serial.SerialException:
             break
@@ -67,32 +79,14 @@ def processar_fila_mouse(root):
     root.after(10, lambda: processar_fila_mouse(root))
 
 def serial_ports():
-    ports = []
     if sys.platform.startswith('win'):
-        for i in range(1, 256):
-            port = f'COM{i}'
-            try:
-                s = serial.Serial(port)
-                s.close()
-                ports.append(port)
-            except (OSError, serial.SerialException):
-                pass
+        return [port.device for port in list_ports.comports()]
     elif sys.platform.startswith('linux') or sys.platform.startswith('cygwin'):
-        ports = glob.glob('/dev/tty[A-Za-z]*')
+        return glob.glob('/dev/tty[A-Za-z]*')
     elif sys.platform.startswith('darwin'):
-        ports = glob.glob('/dev/tty.*')
+        return glob.glob('/dev/tty.*')
     else:
         raise EnvironmentError('Plataforma não suportada para detecção de portas seriais.')
-
-    result = []
-    for port in ports:
-        try:
-            s = serial.Serial(port)
-            s.close()
-            result.append(port)
-        except (OSError, serial.SerialException):
-            pass
-    return result
 
 def parse_data(data):
     axis = data[0]
@@ -101,7 +95,6 @@ def parse_data(data):
 
 def conectar_porta(port_name, root, botao_conectar, status_label, mudar_cor_circulo):
     if not port_name:
-        messagebox.showwarning("Aviso", "Selecione uma porta serial antes de conectar.")
         return
 
     # Inicia a variável como None para evitar o erro do "finally"
@@ -111,7 +104,8 @@ def conectar_porta(port_name, root, botao_conectar, status_label, mudar_cor_circ
         ser = serial.Serial(port_name, 115200, timeout=1)
         status_label.config(text=f"Conectado em {port_name}", foreground="green")
         mudar_cor_circulo("green")
-        botao_conectar.config(text="Conectado", state="disabled") # Desabilita o botão para não clicar duas vezes
+        if botao_conectar is not None:
+            botao_conectar.config(text="Conectado", state="disabled")
         root.update()
 
         # Inicia a Thread de leitura
@@ -127,7 +121,7 @@ def conectar_porta(port_name, root, botao_conectar, status_label, mudar_cor_circ
 def criar_janela():
     root = tk.Tk()
     root.title("Controle de Mouse")
-    root.geometry("400x250")
+    root.geometry("800x250")
     root.resizable(False, False)
 
     dark_bg = "#2e2e2e"
@@ -154,14 +148,19 @@ def criar_janela():
     titulo_label.pack(pady=(0, 10))
 
     porta_var = tk.StringVar(value="")
+    portas_disponiveis = []
 
-    botao_conectar = ttk.Button(
-        frame_principal,
-        text="Conectar",
-        style="Accent.TButton",
-        command=lambda: conectar_porta(porta_var.get(), root, botao_conectar, status_label, mudar_cor_circulo)
-    )
-    botao_conectar.pack(pady=10)
+    def atualizar_portas():
+        nonlocal portas_disponiveis
+        portas_disponiveis = serial_ports()
+        port_dropdown["values"] = portas_disponiveis
+
+        if portas_disponiveis:
+            porta_var.set(portas_disponiveis[0])
+            status_label.config(text="Porta serial detectada. Selecione a COM do Bluetooth.", foreground="white")
+        else:
+            porta_var.set("")
+            status_label.config(text="Nenhuma porta serial detectada. Verifique pareamento Bluetooth/driver.", foreground="orange")
 
     footer_frame = tk.Frame(root, bg=dark_bg)
     footer_frame.pack(side="bottom", fill="x", padx=10, pady=(10, 0))
@@ -169,26 +168,39 @@ def criar_janela():
     status_label = tk.Label(footer_frame, text="Aguardando seleção de porta...", font=("Segoe UI", 11), bg=dark_bg, fg=dark_fg)
     status_label.grid(row=0, column=0, sticky="w")
 
-    # portas_disponiveis = serial_ports()
-    # Adicionando um fallback caso a detecção falhe mas você saiba a porta
-    # if not portas_disponiveis:
-    portas_disponiveis = ["COM4", "COM5", "COM6", "COM7"] 
-    porta_var.set(portas_disponiveis[0])
-
-    port_dropdown = ttk.Combobox(footer_frame, textvariable=porta_var, values=portas_disponiveis, state="normal", width=10)
+    port_dropdown = ttk.Combobox(footer_frame, textvariable=porta_var, values=portas_disponiveis, state="readonly", width=12)
     port_dropdown.grid(row=0, column=1, padx=10)
+    port_dropdown.bind(
+        "<<ComboboxSelected>>",
+        lambda event: conectar_porta(porta_var.get(), root, None, status_label, mudar_cor_circulo)
+    )
+
+    atualizar_portas()
+
+    botao_atualizar = ttk.Button(
+        footer_frame,
+        text="Atualizar",
+        command=atualizar_portas
+    )
+    botao_atualizar.grid(row=0, column=2, padx=(0, 10))
 
     circle_canvas = tk.Canvas(footer_frame, width=20, height=20, highlightthickness=0, bg=dark_bg)
     circle_item = circle_canvas.create_oval(2, 2, 18, 18, fill="red", outline="")
-    circle_canvas.grid(row=0, column=2, sticky="e")
+    circle_canvas.grid(row=0, column=3, sticky="e")
 
     footer_frame.columnconfigure(1, weight=1)
 
     def mudar_cor_circulo(cor):
         circle_canvas.itemconfig(circle_item, fill=cor)
 
+    def conectar_porta_automatica():
+        if porta_var.get():
+            conectar_porta(porta_var.get(), root, None, status_label, mudar_cor_circulo)
+
     # Dá a partida no loop que lê a fila de forma segura
     processar_fila_mouse(root)
+
+    root.after(100, conectar_porta_automatica)
 
     root.mainloop()
 
